@@ -1,0 +1,16 @@
+{
+  "name": "@paperclipai/relay-bridge",
+  "version": "0.1.0",
+  "description": "sms-sushi ↔ Paperclip relay bridge: pushes pending interactions to Tim's phone and writes responses back",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.19.0",
+    "typescript": "^5.7.0"
+  }
+}
