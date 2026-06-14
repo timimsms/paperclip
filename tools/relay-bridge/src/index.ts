@@ -14,7 +14,8 @@
  *
  * Optional:
  *   POLL_INTERVAL_MS        — Paperclip poll interval (default: 15000)
- *   SMS_POLL_TIMEOUT_MS     — sms-sushi long-poll timeout per attempt (default: 29000)
+ *   SMS_POLL_TIMEOUT_MS     — sms-sushi long-poll timeout per attempt (default: 55000)
+ *   RE_NOTIFY_INTERVAL_MS   — minimum delay before re-sending if notification expires (default: 300000 = 5 min)
  *   STATE_FILE              — path to persist resolved interaction IDs (default: ./relay-state.json)
  */
 
@@ -27,8 +28,14 @@ const SMS_SUSHI_API_TOKEN = requireEnv("SMS_SUSHI_API_TOKEN");
 const SMS_SUSHI_BASE_URL =
   process.env.SMS_SUSHI_BASE_URL ?? "https://sms-sushi.fly.dev";
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? "15000");
+// Use 55s poll timeout — permission_prompt notifications stay alive indefinitely so
+// we want each poll attempt close to the sms-sushi server's own timeout window.
 const SMS_POLL_TIMEOUT_MS = parseInt(
-  process.env.SMS_POLL_TIMEOUT_MS ?? "29000"
+  process.env.SMS_POLL_TIMEOUT_MS ?? "55000"
+);
+// Minimum gap between re-notifications for the same interaction (after expiry).
+const RE_NOTIFY_INTERVAL_MS = parseInt(
+  process.env.RE_NOTIFY_INTERVAL_MS ?? "300000"
 );
 const STATE_FILE = process.env.STATE_FILE ?? "./relay-state.json";
 
@@ -109,6 +116,9 @@ const activeRelays = new Map<
   string,
   { notifId: string; issueId: string }
 >();
+
+// interactionId → timestamp of last notification send (for re-notify throttle)
+const lastNotifSentAt = new Map<string, number>();
 
 // Interactions we have successfully resolved to Paperclip (persisted across restarts)
 const resolved: Set<string> = loadState();
@@ -203,11 +213,13 @@ async function sendNotification(
 
   const message = `[${issue.identifier}] ${interaction.title}\n\n${prompt}`;
 
+  // Use permission_prompt type: it stays in awaiting_response state indefinitely
+  // (no short TTL), allowing Tim to respond at his convenience.
   const result = await smsSushiPost<SmsSushiCreateResponse>(
     "/api/v1/notifications",
     {
       message,
-      type: "blocked",
+      type: "permission_prompt",
       response_type: "choice",
       options: [acceptLabel, rejectLabel],
     }
@@ -295,6 +307,7 @@ async function startRelay(
   }
 
   activeRelays.set(interaction.id, { notifId, issueId: issue.id });
+  lastNotifSentAt.set(interaction.id, Date.now());
 
   // Poll and resolve asynchronously
   pollAndResolve(interaction, issue, notifId).catch((err) => {
@@ -378,6 +391,12 @@ async function tick(): Promise<void> {
         continue;
       }
       if (!activeRelays.has(interaction.id)) {
+        const lastSent = lastNotifSentAt.get(interaction.id) ?? 0;
+        const msSinceLast = Date.now() - lastSent;
+        if (msSinceLast < RE_NOTIFY_INTERVAL_MS) {
+          // Throttle: wait before re-sending an expired notification
+          continue;
+        }
         log(
           `New pending confirmation on ${issue.identifier}: "${interaction.title}"`
         );
