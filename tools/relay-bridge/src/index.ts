@@ -28,10 +28,12 @@ const SMS_SUSHI_API_TOKEN = requireEnv("SMS_SUSHI_API_TOKEN");
 const SMS_SUSHI_BASE_URL =
   process.env.SMS_SUSHI_BASE_URL ?? "https://sms-sushi.fly.dev";
 const POLL_INTERVAL_MS = parseInt(process.env.POLL_INTERVAL_MS ?? "15000");
-// Use 55s poll timeout — permission_prompt notifications stay alive indefinitely so
-// we want each poll attempt close to the sms-sushi server's own timeout window.
-const SMS_POLL_TIMEOUT_MS = parseInt(
-  process.env.SMS_POLL_TIMEOUT_MS ?? "55000"
+// How often to GET-poll sms-sushi for a response on a sent notification.
+// We use short GET polling (not the /poll long-poll endpoint) because the
+// /poll endpoint causes the server to expire the notification after its
+// own ~30s window, making it impossible for Tim to respond later.
+const SMS_POLL_INTERVAL_MS = parseInt(
+  process.env.SMS_POLL_INTERVAL_MS ?? "5000"
 );
 // Minimum gap between re-notifications for the same interaction (after expiry).
 const RE_NOTIFY_INTERVAL_MS = parseInt(
@@ -228,89 +230,33 @@ async function sendNotification(
   return result.notification_id;
 }
 
-// Long-polls sms-sushi until a response arrives or the notification expires.
-// Returns the raw response string on success, null on expiry/cancellation.
+// Short-polls sms-sushi via GET until a response arrives or the notification expires.
+// We avoid the /poll long-poll endpoint because it expires the notification when its
+// own server-side window (~30s) times out, leaving Tim no time to respond.
+// Instead, we GET the notification status every SMS_POLL_INTERVAL_MS.
 async function pollForResponse(notifId: string): Promise<string | null> {
   for (;;) {
+    await sleep(SMS_POLL_INTERVAL_MS);
+    let data: SmsSushiNotification;
     try {
-      const signal = AbortSignal.timeout(SMS_POLL_TIMEOUT_MS);
-      const res = await fetch(
-        `${SMS_SUSHI_BASE_URL}/api/v1/notifications/${notifId}/poll`,
-        {
-          headers: { Authorization: `Bearer ${SMS_SUSHI_API_TOKEN}` },
-          signal,
-        }
+      data = await smsSushiGet<SmsSushiNotification>(
+        `/api/v1/notifications/${notifId}`
       );
-
-      if (!res.ok) {
-        if (res.status === 404) {
-          log(`Notification ${notifId} not found — treating as expired`);
-          return null;
-        }
-        const body = await res.text();
-        log(`poll HTTP ${res.status} for ${notifId}: ${body} — retrying in 2s`);
-        await sleep(2000);
-        continue;
-      }
-
-      const data = (await res.json()) as SmsSushiNotification;
-
-      if (data.response !== null && data.response !== undefined) {
-        return data.response;
-      }
-
-      if (data.status === "expired" || data.status === "cancelled") {
-        // /poll returns status:"expired" for both true notification expiry AND for
-        // its own poll-window timeout ("no response within N seconds, try again").
-        // Verify against the actual notification before giving up.
-        try {
-          const actual = await smsSushiGet<SmsSushiNotification>(
-            `/api/v1/notifications/${notifId}`
-          );
-          if (actual.response !== null && actual.response !== undefined) {
-            return actual.response;
-          }
-          if (actual.status === "expired" || actual.status === "cancelled") {
-            log(`Notification ${notifId} truly ${actual.status} — stopping poll`);
-            return null;
-          }
-          // Notification is still live (sms_sent / awaiting_response) — the poll
-          // "expired" was only a timeout signal; continue polling.
-          log(
-            `Notification ${notifId} poll window expired (notification still ${actual.status}) — retrying`
-          );
-          continue;
-        } catch {
-          // Can't verify — treat as truly expired to avoid an infinite loop
-          log(
-            `Notification ${notifId} ${data.status} (could not verify actual status) — stopping poll`
-          );
-          return null;
-        }
-      }
-
-      // Status changed but no response yet — keep polling
     } catch (err) {
-      if (err instanceof Error && err.name === "TimeoutError") {
-        // Normal long-poll timeout — check if there's already a response via GET
-        try {
-          const data = await smsSushiGet<SmsSushiNotification>(
-            `/api/v1/notifications/${notifId}`
-          );
-          if (data.response !== null && data.response !== undefined) {
-            return data.response;
-          }
-          if (data.status === "expired" || data.status === "cancelled") {
-            log(`Notification ${notifId} ${data.status} (detected on timeout check)`);
-            return null;
-          }
-        } catch {
-          // Ignore GET errors and retry the poll
-        }
-        continue;
-      }
-      throw err;
+      log(`GET notification ${notifId} failed: ${err} — retrying`);
+      continue;
     }
+
+    if (data.response !== null && data.response !== undefined) {
+      return data.response;
+    }
+
+    if (data.status === "expired" || data.status === "cancelled") {
+      log(`Notification ${notifId} ${data.status} without response`);
+      return null;
+    }
+
+    // Still awaiting_response or sms_sent — keep polling
   }
 }
 
@@ -346,7 +292,7 @@ async function pollAndResolve(
   issue: PaperclipIssue,
   notifId: string
 ): Promise<void> {
-  log(`⏳ Polling sms-sushi for response on notification ${notifId}…`);
+  log(`⏳ Waiting for Tim's response on sms-sushi notification ${notifId}…`);
 
   const response = await pollForResponse(notifId);
 

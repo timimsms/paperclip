@@ -26,7 +26,7 @@ Copy `.env.example` to `.env` and fill in:
 
 Optional tuning:
 - `POLL_INTERVAL_MS` — how often to check Paperclip for new interactions (default: 15000ms)
-- `SMS_POLL_TIMEOUT_MS` — sms-sushi long-poll window per attempt (default: 29000ms)
+- `SMS_POLL_INTERVAL_MS` — how often to GET-poll sms-sushi for a response (default: 5000ms)
 - `STATE_FILE` — path for resolved-interaction state (default: `./relay-state.json`)
 
 ## How to run
