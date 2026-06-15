@@ -260,8 +260,33 @@ async function pollForResponse(notifId: string): Promise<string | null> {
       }
 
       if (data.status === "expired" || data.status === "cancelled") {
-        log(`Notification ${notifId} ${data.status} without response`);
-        return null;
+        // /poll returns status:"expired" for both true notification expiry AND for
+        // its own poll-window timeout ("no response within N seconds, try again").
+        // Verify against the actual notification before giving up.
+        try {
+          const actual = await smsSushiGet<SmsSushiNotification>(
+            `/api/v1/notifications/${notifId}`
+          );
+          if (actual.response !== null && actual.response !== undefined) {
+            return actual.response;
+          }
+          if (actual.status === "expired" || actual.status === "cancelled") {
+            log(`Notification ${notifId} truly ${actual.status} — stopping poll`);
+            return null;
+          }
+          // Notification is still live (sms_sent / awaiting_response) — the poll
+          // "expired" was only a timeout signal; continue polling.
+          log(
+            `Notification ${notifId} poll window expired (notification still ${actual.status}) — retrying`
+          );
+          continue;
+        } catch {
+          // Can't verify — treat as truly expired to avoid an infinite loop
+          log(
+            `Notification ${notifId} ${data.status} (could not verify actual status) — stopping poll`
+          );
+          return null;
+        }
       }
 
       // Status changed but no response yet — keep polling
