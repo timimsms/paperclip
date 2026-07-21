@@ -94,6 +94,18 @@ export {
   updateResourceMembershipSchema,
   type UpdateResourceMembership,
 } from "./resource-memberships.js";
+export {
+  generateSummarySlotSchema,
+  summarySlotKeySchema,
+  summarySlotQuerySchema,
+  summarySlotScopeKindSchema,
+  summarySlotScopeSelectorSchema,
+  summarySlotStatusSchema,
+  writeSummarySlotSchema,
+  type GenerateSummarySlotInput,
+  type SummarySlotScopeSelectorInput,
+  type WriteSummarySlotInput,
+} from "./summary-slot.js";
 
 export {
   externalObjectStatusCategorySchema,
@@ -194,6 +206,23 @@ export {
   type CompanySkillInstallUpdate,
   type CompanySkillReset,
 } from "./company-skill.js";
+export {
+  folderKindSchema,
+  folderSlugSchema,
+  folderSchema,
+  folderListItemSchema,
+  folderListResultSchema,
+  createFolderSchema,
+  updateFolderSchema,
+  moveFolderSchema,
+  moveFolderItemSchema,
+  ensureMySkillFolderSchema,
+  type CreateFolder,
+  type UpdateFolder,
+  type MoveFolder,
+  type MoveFolderItem,
+  type EnsureMySkillFolder,
+} from "./folder.js";
 export {
   catalogTeamKindSchema,
   catalogTeamTrustLevelSchema,
@@ -420,12 +449,19 @@ export {
 } from "./issue.js";
 
 export {
+  COMPANY_SEARCH_EXTRACT_DEFAULT_LIMIT,
+  COMPANY_SEARCH_EXTRACT_DEFAULT_MATCHES_PER_ISSUE,
+  COMPANY_SEARCH_EXTRACT_MAX_LIMIT,
+  COMPANY_SEARCH_EXTRACT_MAX_MATCHES_PER_ISSUE,
+  COMPANY_SEARCH_EXTRACT_MAX_OFFSET,
   COMPANY_SEARCH_DEFAULT_LIMIT,
   COMPANY_SEARCH_MAX_LIMIT,
   COMPANY_SEARCH_MAX_OFFSET,
   COMPANY_SEARCH_MAX_QUERY_LENGTH,
   COMPANY_SEARCH_MAX_TOKENS,
   companySearchQuerySchema,
+  companySearchExtractQuerySchema,
+  type CompanySearchExtractQuery,
   type CompanySearchQuery,
 } from "./search.js";
 
@@ -833,3 +869,4 @@ export {
   type CreateToolTrustRuleFromActionRequest,
   type RevokeToolTrustRule,
 } from "./tool-access.js";
+export * from "./skill-policy.js";

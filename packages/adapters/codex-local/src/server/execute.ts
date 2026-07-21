@@ -2,6 +2,8 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inferOpenAiCompatibleBiller, type AdapterExecutionContext, type AdapterExecutionResult } from "@paperclipai/adapter-utils";
+import { buildCodexAuthInboundProvision } from "./codex-auth-merge-scripts.js";
+import { copyBackCodexAuth } from "./codex-auth-copyback.js";
 import {
   adapterExecutionTargetIsRemote,
   adapterExecutionTargetRemoteCwd,
@@ -17,6 +19,7 @@ import {
   resolveAdapterExecutionTargetTimeoutSec,
   resolveAdapterExecutionTargetCommandForLogs,
   runAdapterExecutionTargetProcess,
+  runAdapterExecutionTargetShellCommand,
   startAdapterExecutionTargetPaperclipBridge,
 } from "@paperclipai/adapter-utils/execution-target";
 import {
@@ -34,6 +37,7 @@ import {
   resolvePaperclipDesiredSkillNames,
   renderTemplate,
   renderPaperclipWakePrompt,
+  isPaperclipRecoveryWakePayload,
   stringifyPaperclipWakePayload,
   DEFAULT_PAPERCLIP_AGENT_PROMPT_TEMPLATE,
   joinPromptSections,
@@ -54,6 +58,7 @@ import {
   isCodexUnknownSessionError,
 } from "./parse.js";
 import {
+  codexHomeHasUsableAuth,
   evaluateCodexCredentialReadiness,
   isManagedCodexHomePath,
   pathExists,
@@ -65,6 +70,12 @@ import {
   writeManagedCodexMcpConfig,
   type ManagedCodexMcpGateway,
 } from "./codex-home.js";
+import {
+  CODEX_SANDBOX_AUTH_EXISTS_COMMAND,
+  CODEX_SANDBOX_AUTH_PRECEDENCE_WARNING,
+  CODEX_SANDBOX_AUTH_PRECEDENCE_WARNING_LOG_LINE,
+  resolveCodexAuthPrecedence,
+} from "./auth-precedence.js";
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
 import { buildCodexExecArgs } from "./codex-args.js";
@@ -270,6 +281,76 @@ function managedMcpGatewaysFromContext(context: Record<string, unknown>): Manage
     .filter((gateway): gateway is ManagedCodexMcpGateway => Boolean(gateway));
 }
 
+type ResolvedExecutionTarget = ReturnType<typeof readAdapterExecutionTarget>;
+type MaybeResolvedExecutionTarget = ResolvedExecutionTarget | undefined;
+
+async function sandboxCodexAuthJsonExists(input: {
+  runId: string;
+  target: MaybeResolvedExecutionTarget;
+  cwd: string;
+}): Promise<boolean> {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox") {
+    return false;
+  }
+
+  try {
+    const result = await runAdapterExecutionTargetShellCommand(
+      input.runId,
+      input.target,
+      CODEX_SANDBOX_AUTH_EXISTS_COMMAND,
+      {
+        cwd: input.cwd,
+        env: {},
+        timeoutSec: 5,
+      },
+    );
+    return !result.timedOut && result.exitCode === 0;
+  } catch {
+    return false;
+  }
+}
+
+async function emitSandboxAuthPrecedenceWarningIfNeeded(input: {
+  runId: string;
+  target: MaybeResolvedExecutionTarget;
+  cwd: string;
+  configuredApiKey: boolean;
+  hostAuthJson: boolean;
+  onLog: AdapterExecutionContext["onLog"];
+  onEvent: AdapterExecutionContext["onEvent"];
+}): Promise<void> {
+  if (!input.target || input.target.kind !== "remote" || input.target.transport !== "sandbox") {
+    return;
+  }
+
+  const sandboxAuthJson = await sandboxCodexAuthJsonExists({
+    runId: input.runId,
+    target: input.target,
+    cwd: input.cwd,
+  });
+  const resolution = resolveCodexAuthPrecedence({
+    configuredApiKey: input.configuredApiKey,
+    hostAuthJson: input.hostAuthJson,
+    sandboxAuthJson,
+  });
+  if (!resolution.shouldWarn) return;
+
+  await input.onLog("stderr", CODEX_SANDBOX_AUTH_PRECEDENCE_WARNING_LOG_LINE);
+  await input.onEvent?.({
+    eventType: "codex.auth_precedence_warning",
+    stream: "system",
+    level: "warn",
+    message: CODEX_SANDBOX_AUTH_PRECEDENCE_WARNING,
+    payload: {
+      configuredApiKey: input.configuredApiKey,
+      hostAuthJson: input.hostAuthJson,
+      sandboxAuthJson,
+      winner: resolution.winner,
+      sandboxLoginShadowed: resolution.sandboxLoginShadowed,
+    },
+  });
+}
+
 function buildCodexTransientHandoffNote(input: {
   previousSessionId: string | null;
   fallbackMode: CodexTransientFallbackMode;
@@ -372,7 +453,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     await ctx.onLog("stderr", formatCodexAcpFallbackMessage(engineSelection.fallbackReason));
   }
 
-  const { runId, agent, runtime, config, context, onLog, onMeta, onSpawn, authToken } = ctx;
+  const { runId, agent, runtime, config, context, onLog, onMeta, onEvent, onSpawn, authToken } = ctx;
 
   const promptTemplate = asString(
     config.promptTemplate,
@@ -550,6 +631,27 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 key: "home",
                 localDir: effectiveCodexHome,
                 followSymlinks: true,
+                // Inbound (host→sandbox) auth-merge contribution: stages the two
+                // merge scripts and runs the merge-extract command so a sandbox
+                // that already carries a Codex `auth.json` keeps whichever
+                // credential is newer. The sandbox runtime core stays adapter-
+                // agnostic — it just invokes this generic `provision` seam.
+                provision: buildCodexAuthInboundProvision(),
+                // Outbound (sandbox→host) auth copy-back contribution: at
+                // teardown, read the sandbox's `auth.json` and — guarded by the
+                // same direction-agnostic decision predicate under a directory
+                // lock — atomically install it onto the shared host credential
+                // when it is a strictly-newer same-identity subscription copy.
+                // The sandbox core stays adapter-agnostic; it just awaits this
+                // generic `restore` seam per asset before destroying the sandbox.
+                // Target is the shared symlink SOURCE (what managed homes point
+                // `auth.json` at), not the in-sandbox symlink.
+                restore: async ({ assetDir, readFile }) =>
+                  void (await copyBackCodexAuth({
+                    readSandboxAuth: () => readFile(path.posix.join(assetDir, "auth.json")),
+                    hostAuthPath: path.join(resolveSharedCodexHomeDir(process.env), "auth.json"),
+                    log: (line) => onLog("stdout", `${line}\n`),
+                  })),
                 // Exclude state that the sandbox run never needs so we don't
                 // tar/upload hundreds of MB on every run:
                 // - `tmp`/`.tmp`: transient dirs that can hold symlinks to the
@@ -581,6 +683,15 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       ? preparedExecutionTargetRuntime?.assetDirs.home ??
         path.posix.join(effectiveExecutionCwd, ".paperclip-runtime", "codex", "home")
       : null;
+    await emitSandboxAuthPrecedenceWarningIfNeeded({
+      runId,
+      target: runtimeExecutionTarget,
+      cwd: effectiveExecutionCwd,
+      configuredApiKey: Boolean(configuredOpenAiApiKey),
+      hostAuthJson: await codexHomeHasUsableAuth(effectiveCodexHome),
+      onLog,
+      onEvent,
+    });
     const hasExplicitApiKey =
       typeof envConfig.PAPERCLIP_API_KEY === "string" && envConfig.PAPERCLIP_API_KEY.trim().length > 0;
     const env: Record<string, string> = { ...paperclipBaseEnv };
@@ -875,7 +986,9 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     if (preparedRuntimeConfig.notes.length > 0) {
       commandNotes.unshift(...preparedRuntimeConfig.notes);
     }
-    const renderedPrompt = shouldUseResumeDeltaPrompt ? "" : renderTemplate(promptTemplate, templateData);
+    const renderedPrompt = shouldUseResumeDeltaPrompt || isPaperclipRecoveryWakePayload(context.paperclipWake)
+      ? ""
+      : renderTemplate(promptTemplate, templateData);
     const sessionHandoffNote = asString(context.paperclipSessionHandoffMarkdown, "").trim();
     const prompt = joinPromptSections([
       promptInstructionsPrefix,
@@ -947,6 +1060,7 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
                 const logLine =
                   `[paperclip] adapter.invoke ${message}; ` +
                   `timeoutMs=${monitorResolution.timeoutMs} elapsedSinceLastEventMs=${monitorElapsedMs} ` +
+                  `outputChunkCount=${state.outputChunkCount} outputBytes=${state.outputBytes} ` +
                   `parsedEvents=${state.parsedEventCount} (timeout=${timeoutSecLabel}s elapsed=${elapsedSec}s); ` +
                   `terminating codex child via SIGTERM (5s grace, then SIGKILL).\n`;
                 // Issue the log without awaiting on the kill hot path, but capture
@@ -988,8 +1102,8 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
           onSpawn: wrappedOnSpawn,
           onRuntimeProgress: ctx.onRuntimeProgress,
           onLog: async (stream, chunk) => {
+            monitor?.noteOutputChunk(stream, chunk);
             if (stream === "stdout") {
-              monitor?.noteStdoutChunk(chunk);
               await onLog(stream, chunk);
               return;
             }

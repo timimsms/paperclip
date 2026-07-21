@@ -1,5 +1,18 @@
 export type { Company } from "./company.js";
 export type {
+  GenerateSummarySlotRequest,
+  GenerateSummarySlotResponse,
+  GetSummarySlotResponse,
+  ListSummarySlotRevisionsResponse,
+  SummarySlot,
+  SummarySlotDocument,
+  SummarySlotIssueRef,
+  SummarySlotRevision,
+  SummarySlotScopeSelector,
+  WriteSummarySlotRequest,
+  WriteSummarySlotResponse,
+} from "./summary-slot.js";
+export type {
   AttentionDecisionVerb,
   AttentionDetailImage,
   AttentionFeed,
@@ -13,6 +26,15 @@ export type {
   AttentionSubjectKind,
   AttentionWorkspaceRef,
 } from "./attention.js";
+export type {
+  DecisionTrainingExample,
+  DecisionTrainingNotesHistoryEntry,
+  DecisionTrainingPreview,
+  DecisionTrainingRetentionPolicy,
+  DecisionTrainingSnapshotV1,
+  DecisionTrainingSourceKind,
+} from "./decision-training.js";
+export { DECISION_TRAINING_RETENTION_POLICY } from "./decision-training.js";
 export type {
   Environment,
   EnvironmentDeleteBlastRadius,
@@ -127,6 +149,8 @@ export type {
   CompanySkillImportRequest,
   CompanySkillImportResult,
   CompanySkillProjectScanRequest,
+  CompanySkillProjectScanCandidateStatus,
+  CompanySkillProjectScanCandidate,
   CompanySkillProjectScanSkipped,
   CompanySkillProjectScanConflict,
   CompanySkillProjectScanResult,
@@ -161,6 +185,17 @@ export type {
   CompanySkillInstallCatalogRequest,
   CompanySkillInstallCatalogResult,
 } from "./company-skill.js";
+export type {
+  FolderKind,
+  Folder,
+  FolderListItem,
+  FolderListResult,
+  CreateFolderRequest,
+  UpdateFolderRequest,
+  MoveFolderRequest,
+  MoveFolderItemRequest,
+  EnsureMySkillFolderRequest,
+} from "./folder.js";
 export type {
   CatalogTeamKind,
   CatalogTeamTrustLevel,
@@ -249,6 +284,12 @@ export type {
 export type { Project, ProjectBudgetSummary, ProjectCodebase, ProjectCodebaseOrigin, ProjectGoalRef, ProjectManagedByPlugin, ProjectWorkspace } from "./project.js";
 export type {
   CompanySearchCountType,
+  CompanySearchExtractIssueResult,
+  CompanySearchExtractKind,
+  CompanySearchExtractMatch,
+  CompanySearchExtractResponse,
+  CompanySearchExtractScope,
+  CompanySearchExtractSourceRef,
   CompanySearchFilterOptionCounts,
   CompanySearchHighlight,
   CompanySearchArtifactSummary,
@@ -264,7 +305,13 @@ export type {
   CompanySearchZeroResults,
   CompanySearchZeroResultsLoosenSuggestion,
 } from "./search.js";
-export { COMPANY_SEARCH_SCOPES, COMPANY_SEARCH_SORTS, COMPANY_SEARCH_UPDATED_WITHIN_OPTIONS } from "./search.js";
+export {
+  COMPANY_SEARCH_EXTRACT_KINDS,
+  COMPANY_SEARCH_EXTRACT_SCOPES,
+  COMPANY_SEARCH_SCOPES,
+  COMPANY_SEARCH_SORTS,
+  COMPANY_SEARCH_UPDATED_WITHIN_OPTIONS,
+} from "./search.js";
 export type {
   ExecutionWorkspace,
   ExecutionWorkspaceSummary,
