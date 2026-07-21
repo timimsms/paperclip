@@ -37,6 +37,7 @@ jobs:
 
       - name: Generate commitperclip token
         id: token
+        continue-on-error: true  # gracefully skip quality/security gates on forks without COMMITPERCLIP_KEY
         run: |
           TOKEN=$(node .github/scripts/get-bot-token.mjs)
           echo "::add-mask::$TOKEN"
@@ -69,6 +70,7 @@ jobs:
       - name: Fail if quality gates failed
         if: >-
           github.event.pull_request.user.login != 'dependabot[bot]' &&
+          steps.token.outcome == 'success' &&
           steps.quality.outcome == 'failure'
         run: |
           echo "One or more quality gates failed. See commitperclip comment on the PR for details."

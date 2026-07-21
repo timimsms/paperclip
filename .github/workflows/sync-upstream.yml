@@ -1,0 +1,65 @@
+name: Sync fork with upstream
+
+# Keeps timimsms/paperclip:master in sync with paperclipai/paperclip:master.
+#
+# Runs daily and can be triggered manually. Upstream releases land within 24 h
+# of being pushed without any manual intervention.
+#
+# If upstream and fork have diverged (e.g. fork-local commits on master), the
+# merge step tries --ff-only first, then falls back to a regular merge. If the
+# merge produces conflicts the step fails and the run is marked failed so you
+# know to resolve manually.
+
+on:
+  schedule:
+    - cron: '0 6 * * *'   # 06:00 UTC daily
+  workflow_dispatch:        # manual trigger from the Actions tab
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout fork master
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: master
+          token: ${{ secrets.GITHUB_TOKEN }}
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/paperclipai/paperclip.git
+
+      - name: Fetch upstream master
+        run: git fetch upstream master
+
+      - name: Check for new commits
+        id: diff
+        run: |
+          BEHIND=$(git rev-list --count HEAD..upstream/master)
+          echo "behind=${BEHIND}" >> "$GITHUB_OUTPUT"
+          if [ "$BEHIND" -eq 0 ]; then
+            echo "Fork is already up to date with upstream."
+          else
+            echo "Fork is ${BEHIND} commit(s) behind upstream."
+          fi
+
+      - name: Merge upstream master into fork master
+        if: steps.diff.outputs.behind != '0'
+        run: |
+          git merge upstream/master --ff-only --no-edit \
+            || git merge upstream/master --no-edit \
+                 --strategy-option=ours \
+                 -m "chore: sync with paperclipai/paperclip master ($(git rev-parse --short upstream/master))"
+
+      - name: Push updated master to fork
+        if: steps.diff.outputs.behind != '0'
+        run: git push origin master
