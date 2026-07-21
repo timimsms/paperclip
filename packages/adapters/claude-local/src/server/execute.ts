@@ -1,6 +1,14 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import {
+  readSmsSushiConfig,
+  smsSushiRegisterSession,
+  smsSushiSessionHeartbeat,
+  smsSushiCompleteSession,
+  smsSushiNotifyTaskComplete,
+  startApprovalBridge,
+} from "./sms-sushi.js";
 import type { AdapterExecutionContext, AdapterExecutionResult } from "@paperclipai/adapter-utils";
 import type { RunProcessResult } from "@paperclipai/adapter-utils/server-utils";
 import {
@@ -1169,6 +1177,40 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
     };
   };
 
+  // ─── SmsSushi integration (fail-open; disabled by default) ─────────────────
+  const smsSushiCfg = readSmsSushiConfig(config, effectiveEnv);
+  const smsSushiTaskId =
+    (typeof context.taskId === "string" && context.taskId.trim()) ||
+    (typeof context.issueId === "string" && context.issueId.trim()) ||
+    null;
+
+  let smsSushiSessionId: string | null = null;
+  let smsSushiHeartbeatTimer: ReturnType<typeof setInterval> | null = null;
+  let smsSushiApprovalBridge: ReturnType<typeof startApprovalBridge> | null = null;
+
+  if (smsSushiCfg) {
+    smsSushiSessionId = await smsSushiRegisterSession(smsSushiCfg, {
+      taskId: smsSushiTaskId,
+      agentId: agent.id,
+      runId,
+    });
+    if (smsSushiSessionId) {
+      smsSushiHeartbeatTimer = setInterval(() => {
+        void smsSushiSessionHeartbeat(smsSushiCfg, smsSushiSessionId!);
+      }, 90_000);
+    }
+    if (smsSushiTaskId && env.PAPERCLIP_API_URL && env.PAPERCLIP_API_KEY) {
+      smsSushiApprovalBridge = startApprovalBridge({
+        cfg: smsSushiCfg,
+        taskId: smsSushiTaskId,
+        apiUrl: env.PAPERCLIP_API_URL,
+        apiKey: env.PAPERCLIP_API_KEY,
+        onLog,
+      });
+    }
+  }
+  // ────────────────────────────────────────────────────────────────────────────
+
   try {
     const initial = await runAttempt(sessionId ?? null);
     const sessionErrorKind =
@@ -1217,11 +1259,18 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
         }
       }
       const retry = await runAttempt(null);
+      await smsSushiFireTaskCompleteNotification(smsSushiCfg, smsSushiTaskId, env);
       return toAdapterResult(retry, { fallbackSessionId: null, clearSessionOnMissingSession: true });
     }
 
+    await smsSushiFireTaskCompleteNotification(smsSushiCfg, smsSushiTaskId, env);
     return toAdapterResult(initial, { fallbackSessionId: runtimeSessionId || runtime.sessionId });
   } finally {
+    smsSushiApprovalBridge?.stop();
+    if (smsSushiHeartbeatTimer) clearInterval(smsSushiHeartbeatTimer);
+    if (smsSushiCfg && smsSushiSessionId) {
+      await smsSushiCompleteSession(smsSushiCfg, smsSushiSessionId);
+    }
     if (paperclipBridge) {
       await paperclipBridge.stop();
     }
@@ -1232,5 +1281,37 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
       );
       await restoreRemoteWorkspace();
     }
+  }
+}
+
+async function smsSushiFireTaskCompleteNotification(
+  cfg: ReturnType<typeof readSmsSushiConfig>,
+  taskId: string | null,
+  env: Record<string, string>,
+): Promise<void> {
+  if (!cfg || !taskId || !env.PAPERCLIP_API_URL || !env.PAPERCLIP_API_KEY) return;
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 5_000);
+    const data = await fetch(`${env.PAPERCLIP_API_URL}/api/issues/${taskId}`, {
+      headers: { Authorization: `Bearer ${env.PAPERCLIP_API_KEY}` },
+      signal: controller.signal,
+    })
+      .then((r) => r.json() as Promise<{ status?: string; title?: string; identifier?: string }>)
+      .catch(() => null)
+      .finally(() => clearTimeout(timer));
+    if (!data) return;
+    const { status, title, identifier } = data;
+    if (status !== "done" && status !== "blocked") return;
+    const state = status === "done" ? ("complete" as const) : ("blocked" as const);
+    const icon = status === "done" ? "✅" : "🚫";
+    const base = env.PAPERCLIP_API_URL.replace(/\/api.*$/, "");
+    const deepLink = identifier ? `${base}/DIR/issues/${identifier}` : "";
+    const message = deepLink
+      ? `${icon} ${title ?? taskId}\n\n${deepLink}`
+      : `${icon} ${title ?? taskId}`;
+    await smsSushiNotifyTaskComplete(cfg, message, state);
+  } catch {
+    // fail-open
   }
 }
